@@ -189,46 +189,56 @@ export async function runDaemonHost(options: DaemonHostOptions): Promise<void> {
     });
   });
 
+  // Keep the loop alive through the pre-listen takeover waits; without it the process can drain and exit before binding.
+  const startupHold = setInterval(() => {}, 1 << 30);
   let claimed = false;
-  await withFileLock(`${options.metadataPath}.bind`, async () => {
-    const live = await probeLiveDaemon(options.socketPath);
-    if (live) {
-      if (await metadataMatches(options.metadataPath, live)) {
-        return;
+  try {
+    await withFileLock(`${options.metadataPath}.bind`, async () => {
+      const live = await probeLiveDaemon(options.socketPath);
+      if (live) {
+        if (await metadataMatches(options.metadataPath, live)) {
+          return;
+        }
+        const liveLayers = live.configLayers ?? [{ path: live.configPath, mtimeMs: live.configMtimeMs ?? null }];
+        if (configLayersEqual(liveLayers, configLayers)) {
+          await writeJsonFile(options.metadataPath, {
+            pid: live.pid,
+            socketPath: live.socketPath,
+            configPath: live.configPath,
+            configLayers: live.configLayers ?? configLayers,
+            startedAt: live.startedAt,
+            logPath: live.logPath ?? null,
+            configMtimeMs: live.configMtimeMs ?? configMtimeMs,
+          });
+          return;
+        }
+        await requestDaemonStop(options.socketPath);
+        if (!(await waitForSocketGone(options.socketPath))) {
+          throw new Error('Stale daemon did not release the socket; not rebinding to avoid orphaning it.');
+        }
       }
-      const liveLayers = live.configLayers ?? [{ path: live.configPath, mtimeMs: live.configMtimeMs ?? null }];
-      if (configLayersEqual(liveLayers, configLayers)) {
-        await writeJsonFile(options.metadataPath, {
-          pid: live.pid,
-          socketPath: live.socketPath,
-          configPath: live.configPath,
-          configLayers: live.configLayers ?? configLayers,
-          startedAt: live.startedAt,
-          logPath: live.logPath ?? null,
-          configMtimeMs: live.configMtimeMs ?? configMtimeMs,
+      await prepareSocket(options.socketPath);
+      await new Promise<void>((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(options.socketPath, () => {
+          server.off('error', reject);
+          resolve();
         });
-        return;
-      }
-    }
-    await prepareSocket(options.socketPath);
-    await new Promise<void>((resolve, reject) => {
-      server.once('error', reject);
-      server.listen(options.socketPath, () => {
-        server.off('error', reject);
-        resolve();
       });
+      await writeJsonFile(options.metadataPath, {
+        pid: process.pid,
+        socketPath: options.socketPath,
+        configPath: options.configPath,
+        configLayers,
+        startedAt: Date.now(),
+        logPath: options.logPath ?? null,
+        configMtimeMs,
+      });
+      claimed = true;
     });
-    await writeJsonFile(options.metadataPath, {
-      pid: process.pid,
-      socketPath: options.socketPath,
-      configPath: options.configPath,
-      configLayers,
-      startedAt: Date.now(),
-      logPath: options.logPath ?? null,
-      configMtimeMs,
-    });
-    claimed = true;
-  });
+  } finally {
+    clearInterval(startupHold);
+  }
 
   if (!claimed) {
     logEvent(logContext, 'Daemon already running for this config; exiting without rebinding.');
@@ -319,6 +329,41 @@ async function probeDaemonStatus(socketPath: string): Promise<StatusResult | nul
   });
 }
 
+async function requestDaemonStop(socketPath: string): Promise<void> {
+  await new Promise<void>((resolve) => {
+    const socket = net.createConnection(socketPath);
+    let settled = false;
+    const finish = (): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      socket.removeAllListeners();
+      socket.destroy();
+      resolve();
+    };
+    socket.setTimeout(DAEMON_PROBE_TIMEOUT_MS, finish);
+    socket.once('connect', () => {
+      socket.write(JSON.stringify({ id: randomUUID(), method: 'stop', params: {} } satisfies DaemonRequest));
+    });
+    socket.once('close', finish);
+    socket.once('error', finish);
+  });
+}
+
+async function waitForSocketGone(socketPath: string, timeoutMs = 5_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      await fs.access(socketPath);
+    } catch {
+      return true;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  return false;
+}
+
 async function prepareSocket(socketPath: string): Promise<void> {
   if (process.platform === 'win32') {
     return;
@@ -334,17 +379,18 @@ async function prepareSocket(socketPath: string): Promise<void> {
 }
 
 async function cleanupArtifacts(options: DaemonHostOptions): Promise<void> {
+  // Unlink metadata before the socket so a replacement can treat a vanished socket as proof cleanup finished.
+  try {
+    await fs.unlink(options.metadataPath);
+  } catch {
+    // ignore
+  }
   if (process.platform !== 'win32') {
     try {
       await fs.unlink(options.socketPath);
     } catch {
       // ignore
     }
-  }
-  try {
-    await fs.unlink(options.metadataPath);
-  } catch {
-    // ignore
   }
 }
 

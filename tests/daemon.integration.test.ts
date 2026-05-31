@@ -338,6 +338,7 @@ await new Promise(() => {});
       const ownerPid = JSON.parse(await readFileWithRetries(metadataPath, 50)).pid as number;
       expect(ownerPid).toBe(replacement.pid);
       expect(replacement.exitCode).toBeNull();
+      expect(stale.exitCode).not.toBeNull();
     } finally {
       for (const child of children) {
         child.kill('SIGKILL');
