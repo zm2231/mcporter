@@ -2,7 +2,7 @@ import crypto, { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import net from 'node:net';
 import path from 'node:path';
-import { listConfigLayerPaths } from '../config/path-discovery.js';
+import { collectConfigLayers, normalizeConfigLayers } from './config-layers.js';
 import { withFileLock } from '../fs-json.js';
 import { getDaemonMetadataPath, getDaemonSocketPath } from './paths.js';
 import type {
@@ -232,8 +232,8 @@ export class DaemonClient {
     if (!metadata) {
       return 'missing';
     }
-    const currentLayers = normalizeLayers(await collectConfigLayers(this.options));
-    const metadataLayers = normalizeLayers(
+    const currentLayers = normalizeConfigLayers(await collectConfigLayers(this.options));
+    const metadataLayers = normalizeConfigLayers(
       metadata.configLayers ?? [{ path: metadata.configPath, mtimeMs: metadata.configMtimeMs ?? null }]
     );
     if (currentLayers.length !== metadataLayers.length) {
@@ -370,34 +370,6 @@ function resolveDaemonStatusTimeout(override?: number): number | undefined {
   return Math.max(override, MIN_DAEMON_STATUS_TIMEOUT_MS);
 }
 
-async function statConfigMtime(configPath: string): Promise<number | null> {
-  try {
-    const stats = await fs.stat(configPath);
-    return stats.mtimeMs;
-  } catch {
-    return null;
-  }
-}
-
-async function collectConfigLayers(
-  options: DaemonClientOptions
-): Promise<Array<{ path: string; mtimeMs: number | null }>> {
-  const layerPaths = await listConfigLayerPaths(
-    options.configExplicit ? { configPath: options.configPath } : {},
-    options.rootDir ?? process.cwd()
-  );
-  const layers: Array<{ path: string; mtimeMs: number | null }> = [];
-  for (const layerPath of layerPaths) {
-    layers.push({ path: layerPath, mtimeMs: await statConfigMtime(layerPath) });
-  }
-  // If no layers were found (e.g., missing defaults), fall back to the primary config path so
-  // explicit single-file runs still record freshness.
-  if (layers.length === 0) {
-    layers.push({ path: path.resolve(options.configPath), mtimeMs: await statConfigMtime(options.configPath) });
-  }
-  return layers;
-}
-
 async function readDaemonMetadata(metadataPath: string): Promise<DaemonMetadata | null> {
   try {
     const raw = await fs.readFile(metadataPath, 'utf8');
@@ -411,17 +383,4 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
-}
-
-function normalizeLayers(
-  layers: Array<{ path: string; mtimeMs: number | null }>
-): Array<{ path: string; mtimeMs: number | null }> {
-  const normalized = layers.map((entry) => ({
-    path: path.isAbsolute(entry.path) ? entry.path : path.resolve(entry.path),
-    mtimeMs: entry.mtimeMs ?? null,
-  }));
-  if (normalized.length < 2) {
-    return normalized;
-  }
-  return normalized.toSorted((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
 }

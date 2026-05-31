@@ -48,7 +48,8 @@ interface DaemonHostOptions {
 
 export async function runDaemonHost(options: DaemonHostOptions): Promise<void> {
   const configLayers = await collectConfigLayers({
-    configPath: options.configExplicit ? options.configPath : undefined,
+    configPath: options.configPath,
+    configExplicit: options.configExplicit,
     rootDir: options.rootDir,
   });
   const daemonConfig = await loadDaemonConfig({
