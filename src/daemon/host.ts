@@ -6,7 +6,7 @@ import { loadDaemonConfig, type ServerDefinition } from '../config.js';
 import { readJsonFile, withFileLock, writeJsonFile } from '../fs-json.js';
 import { isKeepAliveServer } from '../lifecycle.js';
 import { createRuntime, type Runtime } from '../runtime.js';
-import { collectConfigLayers, statConfigMtime } from './config-layers.js';
+import { collectConfigLayers, configLayersEqual, statConfigMtime } from './config-layers.js';
 import {
   createLogContext,
   disposeLogContext,
@@ -192,8 +192,23 @@ export async function runDaemonHost(options: DaemonHostOptions): Promise<void> {
   let claimed = false;
   await withFileLock(`${options.metadataPath}.bind`, async () => {
     const live = await probeLiveDaemon(options.socketPath);
-    if (live && (await metadataMatches(options.metadataPath, live))) {
-      return;
+    if (live) {
+      if (await metadataMatches(options.metadataPath, live)) {
+        return;
+      }
+      const liveLayers = live.configLayers ?? [{ path: live.configPath, mtimeMs: live.configMtimeMs ?? null }];
+      if (configLayersEqual(liveLayers, configLayers)) {
+        await writeJsonFile(options.metadataPath, {
+          pid: live.pid,
+          socketPath: live.socketPath,
+          configPath: live.configPath,
+          configLayers: live.configLayers ?? configLayers,
+          startedAt: live.startedAt,
+          logPath: live.logPath ?? null,
+          configMtimeMs: live.configMtimeMs ?? configMtimeMs,
+        });
+        return;
+      }
     }
     await prepareSocket(options.socketPath);
     await new Promise<void>((resolve, reject) => {
