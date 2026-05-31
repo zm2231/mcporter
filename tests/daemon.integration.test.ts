@@ -250,7 +250,6 @@ await new Promise(() => {});
       'utf8'
     );
 
-    // Pin only the metadata path (not the socket, to stay under the unix socket length limit).
     const env = { ...process.env, MCPORTER_NO_FORCE_EXIT: '1', MCPORTER_DAEMON_METADATA: metadataPath };
     const children: ChildProcess[] = [];
     const startForeground = (): ChildProcess => {
